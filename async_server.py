@@ -11,13 +11,6 @@ if __name__ == "__main__":
         logging.basicConfig(level=logging.WARNING)
 
 
-from pathlib import Path
-import os
-
-# Set Hugging Face cache directories BEFORE importing any models
-dir = Path(__file__).parent.resolve()
-os.environ["HF_HOME"] = str(dir / "models")
-
 from RealtimeTTS import (
     TextToAudioStream,
     AzureEngine,
@@ -37,26 +30,25 @@ from queue import Queue, Empty
 import threading
 import logging
 import uvicorn
-import wave
-import io
 import asyncio
 import base64
-import json
+import wave
+import io
+import os
 
 PORT = int(os.environ.get("TTS_FASTAPI_PORT", 8000))
 
 SUPPORTED_ENGINES = [
-    # "azure",
-    # "openai",
-    # "elevenlabs",
-    # "system",
+    "azure",
+    "openai",
+    "elevenlabs",
+    "system",
     # "coqui",  #multiple queries are not supported on coqui engine right now, comment coqui out for tests where you need server start often,
     "kokoro"
 ]
 
-# change start engine by moving engine name
-# to the first position in SUPPORTED_ENGINES
-START_ENGINE = SUPPORTED_ENGINES[0]
+# START_ENGINE will be set to the first successfully initialized engine
+START_ENGINE = None
 
 BROWSER_IDENTIFIERS = [
     "mozilla",
@@ -84,6 +76,7 @@ play_text_to_speech_semaphore = threading.Semaphore(1)
 engines = {}
 voices = {}
 current_engine = None
+current_engine_name = None
 speaking_lock = threading.Lock()
 tts_lock = threading.Lock()
 gen_lock = threading.Lock()
@@ -103,19 +96,16 @@ class TTSRequestHandler:
         self.audio_queue.put(chunk)
 
     def on_audio_stream_stop(self):
-        print("on_audio_stream_stop called")
         self.audio_queue.put(None)
         self.speaking = False
         self.generation_complete.set()
 
     def play_text_to_speech(self, text):
         self.speaking = True
-        self.generation_complete.clear()
         self.stream.feed(text)
         logging.debug(f"Playing audio for text: {text}")
         print(f'Synthesizing: "{text}"')
         self.stream.play_async(on_audio_chunk=self.on_audio_chunk, muted=True)
-        # Note: play_async returns immediately, chunks will be added to queue via callback
 
     def audio_chunk_generator(self, send_wave_headers):
         first_chunk = False
@@ -170,14 +160,18 @@ async def favicon():
 
 
 def _set_engine(engine_name):
-    global current_engine, stream
-    if current_engine is None:
-        current_engine = engines[engine_name]
-    else:
-        current_engine = engines[engine_name]
+    global current_engine, current_engine_name, stream
+    if engine_name not in engines:
+        print(f"Warning: Engine '{engine_name}' not available")
+        return False
+    
+    current_engine = engines[engine_name]
+    current_engine_name = engine_name
 
     if voices[engine_name]:
         engines[engine_name].set_voice(voices[engine_name][0].name)
+    
+    return True
 
 
 @app.get("/set_engine")
@@ -246,169 +240,6 @@ async def tts(request: Request, text: str = Query(...)):
         )
 
 
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    await websocket.accept()
-    print("WebSocket client connected")
-    
-    text_queue = asyncio.Queue()
-    is_active = True
-    
-    async def receive_messages():
-        """Receive text messages from client and queue them"""
-        nonlocal is_active
-        try:
-            while is_active:
-                text = await websocket.receive_text()
-                print(f"Received text: '{text}'")
-                
-                # Check for stop signal
-                if text.strip() == "" or text.strip().lower() == "stop":
-                    print("Received stop signal")
-                    is_active = False
-                    await text_queue.put(None)  # Signal to stop processing
-                    break
-                
-                await text_queue.put(text)
-        except Exception as e:
-            print(f"Error receiving messages: {e}")
-            is_active = False
-            await text_queue.put(None)
-    
-    async def process_and_stream():
-        """Process queued text and stream audio back"""
-        try:
-            while is_active or not text_queue.empty():
-                # Get next text from queue
-                try:
-                    text = await asyncio.wait_for(text_queue.get(), timeout=1.0)
-                except asyncio.TimeoutError:
-                    continue
-                
-                if text is None:  # Stop signal
-                    print("Processing stopped")
-                    break
-                
-                print(f"Processing: '{text}'")
-                
-                # Create a request handler for this text
-                request_handler = TTSRequestHandler(current_engine)
-                
-                # Start TTS generation
-                if play_text_to_speech_semaphore.acquire(blocking=False):
-                    try:
-                        # Start generation in thread
-                        thread = threading.Thread(
-                            target=request_handler.play_text_to_speech,
-                            args=(text,),
-                            daemon=True,
-                        )
-                        thread.start()
-                        
-                        # Send WAV header as first chunk
-                        wave_header = create_wave_header_for_engine(current_engine)
-                        wave_header_b64 = base64.b64encode(wave_header).decode('utf-8')
-                        
-                        # Get audio format info
-                        _, _, sample_rate = current_engine.get_stream_info()
-                        
-                        header_message = {
-                            "audioOutput": {
-                                "audio": wave_header_b64,
-                                "format": "wav",
-                                "sampleRate": sample_rate,
-                                "isHeader": True
-                            }
-                        }
-                        await websocket.send_json(header_message)
-                        print(f"Sent WAV header (sample rate: {sample_rate})")
-                        
-                        # Stream audio chunks as they arrive
-                        chunks_sent = 0
-                        timeout_count = 0
-                        max_timeout = 100  # 10 seconds total (100 * 0.1s)
-                        
-                        while True:
-                            try:
-                                chunk = request_handler.audio_queue.get(timeout=0.1)
-                                if chunk is None:
-                                    print(f"Audio complete for this text, sent {chunks_sent} chunks")
-                                    # Send final output message
-                                    final_message = {
-                                        "finalOutput": {
-                                            "isFinal": True
-                                        }
-                                    }
-                                    await websocket.send_json(final_message)
-                                    print("Sent final output message")
-                                    break
-                                
-                                # Encode audio chunk as base64
-                                audio_base64 = base64.b64encode(chunk).decode('utf-8')
-                                
-                                # Send audio output message
-                                audio_message = {
-                                    "audioOutput": {
-                                        "audio": audio_base64
-                                    }
-                                }
-                                await websocket.send_json(audio_message)
-                                chunks_sent += 1
-                                timeout_count = 0  # Reset timeout counter when we get data
-                            except Empty:
-                                timeout_count += 1
-                                if timeout_count >= max_timeout:
-                                    print(f"Timeout waiting for chunks, sent {chunks_sent} chunks")
-                                    # Send final output on timeout
-                                    final_message = {
-                                        "finalOutput": {
-                                            "isFinal": True
-                                        }
-                                    }
-                                    await websocket.send_json(final_message)
-                                    break
-                                # Check if generation is complete
-                                if request_handler.generation_complete.is_set() and chunks_sent > 0:
-                                    print(f"Generation marked complete, sent {chunks_sent} chunks")
-                                    # Send final output message
-                                    final_message = {
-                                        "finalOutput": {
-                                            "isFinal": True
-                                        }
-                                    }
-                                    await websocket.send_json(final_message)
-                                    break
-                                await asyncio.sleep(0.01)
-                                continue
-                    finally:
-                        play_text_to_speech_semaphore.release()
-                else:
-                    print("TTS busy, skipping this request")
-        except Exception as e:
-            print(f"Error processing: {e}")
-            import traceback
-            traceback.print_exc()
-    
-    # Run both tasks concurrently
-    try:
-        await asyncio.gather(
-            receive_messages(),
-            process_and_stream()
-        )
-    except WebSocketDisconnect:
-        print("WebSocket client disconnected")
-    except Exception as e:
-        print(f"WebSocket error: {str(e)}")
-        import traceback
-        traceback.print_exc()
-    finally:
-        is_active = False
-        try:
-            await websocket.close()
-        except:
-            pass
-
-
 @app.get("/engines")
 def get_engines():
     return list(engines.keys())
@@ -416,8 +247,11 @@ def get_engines():
 
 @app.get("/voices")
 def get_voices():
+    if not current_engine_name or current_engine_name not in voices:
+        return []
+    
     voices_list = []
-    for voice in voices[current_engine.engine_name]:
+    for voice in voices[current_engine_name]:
         voices_list.append(voice.name)
     return voices_list
 
@@ -437,6 +271,136 @@ def set_voice(request: Request, voice_name: str = Query(...)):
         print(f"Error setting voice: {str(e)}")
         logging.error(f"Error setting voice: {str(e)}")
         return {"error": "Failed to set voice"}
+
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    """Simple WebSocket endpoint for TTS - supports multiple concurrent users"""
+    
+    # Check if system engine is active - it doesn't support WebSocket mode
+    if current_engine_name == "system":
+        await websocket.accept()
+        await websocket.send_json({
+            "error": {
+                "message": "System engine (pyttsx3) does not support WebSocket mode. Please switch to OpenAI, Kokoro, Azure, or ElevenLabs engine.",
+                "engineName": "system"
+            }
+        })
+        await websocket.close()
+        print("WebSocket connection rejected - system engine not supported")
+        return
+    
+    await websocket.accept()
+    print("WebSocket client connected")
+    
+    request_queue = asyncio.Queue()
+    is_active = True
+    
+    async def generate_audio(text: str):
+        """Generate audio for given text and return chunks"""
+        # Create dedicated handler for this request
+        handler = TTSRequestHandler(current_engine)
+        
+        # Start generation in background thread
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, handler.play_text_to_speech, text)
+        
+        # Collect all audio chunks
+        chunks = []
+        while True:
+            try:
+                chunk = handler.audio_queue.get(timeout=0.1)
+                if chunk is None:
+                    break
+                chunks.append(chunk)
+            except Empty:
+                if handler.generation_complete.is_set():
+                    break
+                await asyncio.sleep(0.01)
+        
+        return chunks
+    
+    async def process_requests():
+        """Process queued requests one by one"""
+        while is_active:
+            try:
+                text = await asyncio.wait_for(request_queue.get(), timeout=1.0)
+                if text is None:
+                    break
+                
+                print(f"Processing: '{text}'")
+                
+                # Generate audio
+                audio_chunks = await generate_audio(text)
+                
+                # Send WAV header
+                wave_header = create_wave_header_for_engine(current_engine)
+                _, _, sample_rate = current_engine.get_stream_info()
+                
+                await websocket.send_json({
+                    "audioOutput": {
+                        "audio": base64.b64encode(wave_header).decode('utf-8'),
+                        "format": "wav",
+                        "sampleRate": sample_rate,
+                        "isHeader": True
+                    }
+                })
+                
+                # Send audio chunks
+                for chunk in audio_chunks:
+                    await websocket.send_json({
+                        "audioOutput": {
+                            "audio": base64.b64encode(chunk).decode('utf-8')
+                        }
+                    })
+                
+                # Send completion signal
+                await websocket.send_json({
+                    "finalOutput": {
+                        "isFinal": True
+                    }
+                })
+                print(f"Sent {len(audio_chunks)} chunks")
+                
+            except asyncio.TimeoutError:
+                continue
+            except Exception as e:
+                print(f"Error processing request: {e}")
+                break
+    
+    async def receive_messages():
+        """Receive and queue text messages"""
+        nonlocal is_active
+        try:
+            while is_active:
+                text = await websocket.receive_text()
+                if text.strip() and text.strip().lower() != "stop":
+                    await request_queue.put(text)
+                    print(f"Queued: '{text}'")
+                else:
+                    is_active = False
+                    await request_queue.put(None)
+                    break
+        except WebSocketDisconnect:
+            print("Client disconnected")
+            is_active = False
+            await request_queue.put(None)
+        except Exception as e:
+            print(f"Error receiving: {e}")
+            is_active = False
+            await request_queue.put(None)
+    
+    try:
+        await asyncio.gather(receive_messages(), process_requests())
+    except Exception as e:
+        print(f"WebSocket error: {e}")
+    finally:
+        is_active = False
+        try:
+            await websocket.close()
+        except:
+            pass
+        print("WebSocket closed")
 
 
 @app.get("/")
@@ -561,12 +525,16 @@ if __name__ == "__main__":
             if azure_api_key and azure_region:
                 print("Initializing azure engine")
                 engines["azure"] = AzureEngine(azure_api_key, azure_region)
+            else:
+                print("Azure engine skipped - missing AZURE_SPEECH_KEY or AZURE_SPEECH_REGION")
 
         if "elevenlabs" == engine_name:
             elevenlabs_api_key = os.environ.get("ELEVENLABS_API_KEY")
             if elevenlabs_api_key:
                 print("Initializing elevenlabs engine")
                 engines["elevenlabs"] = ElevenlabsEngine(elevenlabs_api_key)
+            else:
+                print("Elevenlabs engine skipped - missing ELEVENLABS_API_KEY")
 
         if "system" == engine_name:
             print("Initializing system engine")
@@ -581,8 +549,12 @@ if __name__ == "__main__":
             engines["kokoro"] = KokoroEngine()
 
         if "openai" == engine_name:
-            print("Initializing openai engine")
-            engines["openai"] = OpenAIEngine()
+            openai_api_key = os.environ.get("OPENAI_API_KEY")
+            if openai_api_key:
+                print("Initializing openai engine")
+                engines["openai"] = OpenAIEngine()
+            else:
+                print("OpenAI engine skipped - missing OPENAI_API_KEY")
 
     for _engine in engines.keys():
         print(f"Retrieving voices for TTS Engine {_engine}")
@@ -592,7 +564,25 @@ if __name__ == "__main__":
             voices[_engine] = []
             logging.error(f"Error retrieving voices for {_engine}: {str(e)}")
 
-    _set_engine(START_ENGINE)
+    # Set START_ENGINE to first available engine
+    if not engines:
+        print("Error: No TTS engines were successfully initialized!")
+        print("Please check your API keys and configuration.")
+        exit(1)
+    
+    # Try to use the first engine from SUPPORTED_ENGINES that was initialized
+    START_ENGINE = None
+    for engine_name in SUPPORTED_ENGINES:
+        if engine_name in engines:
+            START_ENGINE = engine_name
+            break
+    
+    if START_ENGINE:
+        _set_engine(START_ENGINE)
+        print(f"Default engine set to: {START_ENGINE}")
+    else:
+        print("Error: Could not set default engine")
+        exit(1)
 
     print("Server ready")
     uvicorn.run(app, host="0.0.0.0", port=PORT)

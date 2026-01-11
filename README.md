@@ -7,7 +7,7 @@ This repository contains a FastAPI server that serves as a wrapper for Realtime 
 ## Installation
 
 ```
-pip install fastapi
+uv sync
 ```
 
 ## Components

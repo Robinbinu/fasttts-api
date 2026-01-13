@@ -35,6 +35,17 @@ import base64
 import wave
 import io
 import os
+import struct
+from dotenv import load_dotenv
+load_dotenv()
+
+# Try to import pydub for audio format conversion
+try:
+    from pydub import AudioSegment
+    PYDUB_AVAILABLE = True
+except ImportError:
+    PYDUB_AVAILABLE = False
+    print("Warning: pydub not available. MP3 conversion will not work. Install with: pip install pydub")
 
 PORT = int(os.environ.get("TTS_FASTAPI_PORT", 8000))
 
@@ -82,6 +93,83 @@ tts_lock = threading.Lock()
 gen_lock = threading.Lock()
 
 
+def detect_audio_format(chunk):
+    """Detect audio format from the first few bytes of a chunk."""
+    if not chunk or len(chunk) < 4:
+        return 'pcm'  # Default to PCM for small chunks
+
+    # Check for MP3 (ID3 tag or MP3 frame header)
+    if chunk[:3] == b'ID3':
+        return 'mp3'
+    if len(chunk) >= 2 and chunk[0] == 0xff and (chunk[1] & 0xe0) == 0xe0:
+        return 'mp3'
+
+    # Check for WAV
+    if chunk[:4] == b'RIFF':
+        return 'wav'
+
+    # Check for OGG
+    if chunk[:4] == b'OggS':
+        return 'ogg'
+
+    # Default to PCM (raw audio data)
+    return 'pcm'
+
+
+def convert_audio_to_pcm(audio_data, source_format, target_sample_rate=24000):
+    """Convert audio data from various formats to raw PCM.
+
+    Args:
+        audio_data: Raw audio bytes
+        source_format: Format of the source audio (mp3, wav, ogg, pcm)
+        target_sample_rate: Target sample rate for output (default 24000)
+
+    Returns:
+        tuple: (pcm_data, sample_rate, channels, sample_width)
+    """
+    if source_format == 'pcm':
+        return (audio_data, target_sample_rate, 1, 2)
+
+    if not PYDUB_AVAILABLE:
+        print(f"Warning: Cannot convert {source_format} to PCM - pydub not available")
+        return (audio_data, target_sample_rate, 1, 2)
+
+    try:
+        # Load audio data based on format
+        audio_io = io.BytesIO(audio_data)
+
+        if source_format == 'mp3':
+            audio = AudioSegment.from_mp3(audio_io)
+        elif source_format == 'wav':
+            audio = AudioSegment.from_wav(audio_io)
+        elif source_format == 'ogg':
+            audio = AudioSegment.from_ogg(audio_io)
+        else:
+            print(f"Warning: Unknown format {source_format}, returning original data")
+            return (audio_data, target_sample_rate, 1, 2)
+
+        print(f"Original audio: {audio.frame_rate}Hz, {audio.channels}ch, {audio.sample_width*8}bit")
+
+        # Convert to PCM: mono, 16-bit, target sample rate
+        audio = audio.set_channels(1)
+        audio = audio.set_sample_width(2)  # 16-bit
+
+        # Always resample to target rate for consistency
+        if audio.frame_rate != target_sample_rate:
+            print(f"Resampling from {audio.frame_rate}Hz to {target_sample_rate}Hz")
+            audio = audio.set_frame_rate(target_sample_rate)
+
+        print(f"Converted audio: {audio.frame_rate}Hz, {audio.channels}ch, {audio.sample_width*8}bit")
+
+        # Return raw PCM data with metadata
+        return (audio.raw_data, audio.frame_rate, audio.channels, audio.sample_width)
+    except Exception as e:
+        print(f"Error converting {source_format} to PCM: {e}")
+        import traceback
+        traceback.print_exc()
+        return (audio_data, target_sample_rate, 1, 2)
+
+
 class TTSRequestHandler:
     def __init__(self, engine):
         self.engine = engine
@@ -108,21 +196,66 @@ class TTSRequestHandler:
         self.stream.play_async(on_audio_chunk=self.on_audio_chunk, muted=True)
 
     def audio_chunk_generator(self, send_wave_headers):
-        first_chunk = False
+        """
+        Generate audio chunks, converting format if necessary.
+        Always outputs consistent PCM + WAV header for browser requests.
+        """
         try:
+            # Collect all chunks first
+            chunks = []
             while True:
                 chunk = self.audio_queue.get()
                 if chunk is None:
                     print("Terminating stream")
                     break
-                if not first_chunk:
-                    if send_wave_headers:
-                        print("Sending wave header")
-                        yield create_wave_header_for_engine(self.engine)
-                    first_chunk = True
-                yield chunk
+                chunks.append(chunk)
+
+            if not chunks:
+                print("No audio chunks received")
+                return
+
+            # Combine all chunks into single audio data
+            audio_data = b''.join(chunks)
+
+            # Detect format from first chunk
+            detected_format = detect_audio_format(chunks[0])
+            print(f"Detected audio format: {detected_format}")
+
+            # Convert to PCM if needed
+            sample_rate = 24000
+            if detected_format != 'pcm':
+                print(f"Converting {detected_format} to PCM...")
+                audio_data, sample_rate, channels, sample_width = convert_audio_to_pcm(audio_data, detected_format)
+                print(f"Conversion complete. Audio size: {len(audio_data)} bytes at {sample_rate}Hz")
+            else:
+                # For PCM, try to get sample rate from engine
+                try:
+                    _, _, engine_rate = self.engine.get_stream_info()
+                    if engine_rate and engine_rate > 0:
+                        sample_rate = engine_rate
+                except Exception:
+                    pass
+
+            # For browser requests, create complete WAV file for Safari/iOS compatibility
+            if send_wave_headers:
+                print(f"Creating complete WAV file for browser: {sample_rate}Hz, size: {len(audio_data)} bytes")
+                complete_wav = create_complete_wav_file(audio_data, sample_rate)
+                print(f"Complete WAV file size: {len(complete_wav)} bytes")
+
+                # Stream the complete WAV file in chunks
+                chunk_size = 4096
+                for i in range(0, len(complete_wav), chunk_size):
+                    yield complete_wav[i:i + chunk_size]
+            else:
+                # For non-browser requests, just send raw PCM
+                chunk_size = 4096
+                for i in range(0, len(audio_data), chunk_size):
+                    yield audio_data[i:i + chunk_size]
+
         except Exception as e:
             print(f"Error during streaming: {str(e)}")
+            import traceback
+            traceback.print_exc()
 
 
 app = FastAPI()
@@ -193,29 +326,70 @@ def is_browser_request(request):
     return is_browser
 
 
+def create_complete_wav_file(pcm_data, sample_rate=24000, num_channels=1, sample_width=2):
+    """Create a complete WAV file with proper headers and data."""
+    try:
+        wav_buffer = io.BytesIO()
+        with wave.open(wav_buffer, "wb") as wav_file:
+            wav_file.setnchannels(num_channels)
+            wav_file.setsampwidth(sample_width)
+            wav_file.setframerate(sample_rate)
+            wav_file.writeframes(pcm_data)
+
+        wav_buffer.seek(0)
+        complete_wav = wav_buffer.read()
+        wav_buffer.close()
+
+        return complete_wav
+    except Exception as e:
+        print(f"Error creating WAV file: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
+
+
 def create_wave_header_for_engine(engine):
-    _, _, sample_rate = engine.get_stream_info()
+    try:
+        stream_info = engine.get_stream_info()
+        print(f"Debug: stream_info = {stream_info}")
+        _, _, sample_rate = stream_info
+        print(f"Debug: extracted sample_rate = {sample_rate}")
+    except Exception as e:
+        print(f"Warning: Could not get stream info from engine: {e}")
+        sample_rate = None
+
+    # Default to 24kHz if sample_rate is not specified or invalid (common for ElevenLabs and Kokoro)
+    # Some engines return -1 to indicate unknown sample rate
+    if sample_rate is None or sample_rate <= 0:
+        sample_rate = 24000
+        print(f"Warning: Sample rate not specified or invalid by engine, defaulting to {sample_rate}Hz")
 
     num_channels = 1
     sample_width = 2
     frame_rate = sample_rate
 
-    wav_header = io.BytesIO()
-    with wave.open(wav_header, "wb") as wav_file:
-        wav_file.setnchannels(num_channels)
-        wav_file.setsampwidth(sample_width)
-        wav_file.setframerate(frame_rate)
+    print(f"Debug: Creating WAV header with frame_rate={frame_rate}, num_channels={num_channels}, sample_width={sample_width}")
 
-    wav_header.seek(0)
-    wave_header_bytes = wav_header.read()
-    wav_header.close()
+    try:
+        wav_header = io.BytesIO()
+        with wave.open(wav_header, "wb") as wav_file:
+            wav_file.setnchannels(num_channels)
+            wav_file.setsampwidth(sample_width)
+            wav_file.setframerate(frame_rate)
 
-    # Create a new BytesIO with the correct MIME type for Firefox
-    final_wave_header = io.BytesIO()
-    final_wave_header.write(wave_header_bytes)
-    final_wave_header.seek(0)
+        wav_header.seek(0)
+        wave_header_bytes = wav_header.read()
+        wav_header.close()
 
-    return final_wave_header.getvalue()
+        # Create a new BytesIO with the correct MIME type for Firefox
+        final_wave_header = io.BytesIO()
+        final_wave_header.write(wave_header_bytes)
+        final_wave_header.seek(0)
+
+        return final_wave_header.getvalue()
+    except Exception as e:
+        print(f"Error creating wave header: {e}")
+        raise
 
 
 @app.get("/tts")
@@ -332,25 +506,45 @@ async def websocket_endpoint(websocket: WebSocket):
                 
                 # Generate audio
                 audio_chunks = await generate_audio(text)
-                
-                # Send WAV header
-                wave_header = create_wave_header_for_engine(current_engine)
-                _, _, sample_rate = current_engine.get_stream_info()
-                
-                await websocket.send_json({
-                    "audioOutput": {
-                        "audio": base64.b64encode(wave_header).decode('utf-8'),
-                        "format": "wav",
-                        "sampleRate": sample_rate,
-                        "isHeader": True
-                    }
-                })
-                
-                # Send audio chunks
-                for chunk in audio_chunks:
+
+                if not audio_chunks:
+                    print("No audio chunks generated")
+                    continue
+
+                # Combine all chunks and detect format
+                audio_data = b''.join(audio_chunks)
+                detected_format = detect_audio_format(audio_chunks[0])
+                print(f"WebSocket - Detected audio format: {detected_format}")
+
+                # Convert to PCM if needed
+                sample_rate = 24000
+                if detected_format != 'pcm':
+                    print(f"WebSocket - Converting {detected_format} to PCM...")
+                    audio_data, sample_rate, channels, sample_width = convert_audio_to_pcm(audio_data, detected_format)
+                    print(f"WebSocket - Conversion complete. Audio size: {len(audio_data)} bytes at {sample_rate}Hz")
+                else:
+                    # For PCM, try to get sample rate from engine
+                    try:
+                        _, _, engine_rate = current_engine.get_stream_info()
+                        if engine_rate and engine_rate > 0:
+                            sample_rate = engine_rate
+                    except Exception:
+                        pass
+
+                # Create complete WAV file for Safari/iOS compatibility
+                print(f"WebSocket - Creating complete WAV file: {sample_rate}Hz, size: {len(audio_data)} bytes")
+                complete_wav = create_complete_wav_file(audio_data, sample_rate)
+                print(f"WebSocket - Complete WAV file size: {len(complete_wav)} bytes")
+
+                # Send complete WAV in chunks
+                chunk_size = 8192  # Larger chunks for WebSocket
+                for i in range(0, len(complete_wav), chunk_size):
+                    chunk = complete_wav[i:i + chunk_size]
                     await websocket.send_json({
                         "audioOutput": {
-                            "audio": base64.b64encode(chunk).decode('utf-8')
+                            "audio": base64.b64encode(chunk).decode('utf-8'),
+                            "format": "wav",
+                            "sampleRate": sample_rate
                         }
                     })
                 
@@ -506,7 +700,7 @@ def root_page():
                 </select>
                 <textarea id="text" rows="4" cols="50" placeholder="Enter text here..."></textarea>
                 <button id="speakButton">Speak</button>
-                <audio id="audio" controls></audio>
+                <audio id="audio" controls preload="auto" playsinline webkit-playsinline></audio>
             </div>
             <script src="/static/tts.js"></script>
         </body>
@@ -532,6 +726,8 @@ if __name__ == "__main__":
             elevenlabs_api_key = os.environ.get("ELEVENLABS_API_KEY")
             if elevenlabs_api_key:
                 print("Initializing elevenlabs engine")
+                # Note: ElevenlabsEngine returns MP3 by default from the API
+                # The RealtimeTTS library handles decoding to PCM internally
                 engines["elevenlabs"] = ElevenlabsEngine(elevenlabs_api_key)
             else:
                 print("Elevenlabs engine skipped - missing ELEVENLABS_API_KEY")

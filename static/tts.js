@@ -4,17 +4,136 @@ let websocket = null;
 let audioChunks = [];
 let isPlayingAudio = false;
 let typingTimer = null;
+let currentAudio = null;
+let audioSessionId = 0; // Track which audio session is current
 const TYPING_DELAY = 1000;
+
+// Stop any currently playing audio
+function stopCurrentAudio() {
+    // Increment session ID to invalidate any pending play attempts
+    audioSessionId++;
+
+    if (currentAudio) {
+        // Remove event listeners to prevent them from firing during cleanup
+        currentAudio.oncanplay = null;
+        currentAudio.onended = null;
+        currentAudio.onerror = null;
+
+        // Pause if currently playing
+        if (!currentAudio.paused) {
+            currentAudio.pause();
+        }
+
+        // Clear the source to stop any loading
+        currentAudio.removeAttribute('src');
+        currentAudio.load(); // Reset the audio element
+
+        currentAudio = null;
+    }
+    isPlayingAudio = false;
+}
 
 // HTTP Mode
 async function speakHTTP() {
     const text = document.getElementById("text").value;
     if (!text.trim()) return;
-    
+
     try {
+        stopCurrentAudio();
+        updateStatus('Loading audio...');
+
         const audio = document.getElementById("audio");
-        audio.src = '/tts?text=' + encodeURIComponent(text);
-        audio.play();
+        currentAudio = audio;
+
+        // Capture the session ID for this audio request
+        const thisSessionId = audioSessionId;
+
+        // Fetch the audio data first (for Safari/iOS compatibility)
+        // This ensures we have complete audio before playing
+        const response = await fetch('/tts?text=' + encodeURIComponent(text));
+
+        if (!response.ok) {
+            throw new Error('Failed to fetch audio: ' + response.statusText);
+        }
+
+        // Check if session is still valid
+        if (thisSessionId !== audioSessionId) {
+            console.log('Session expired during fetch');
+            return;
+        }
+
+        // Get audio as blob
+        const audioBlob = await response.blob();
+
+        // Check session again after async operation
+        if (thisSessionId !== audioSessionId) {
+            console.log('Session expired after fetch');
+            return;
+        }
+
+        // Create blob URL
+        const audioUrl = URL.createObjectURL(audioBlob);
+
+        // Set up event listeners
+        audio.onended = () => {
+            if (thisSessionId === audioSessionId) {
+                updateStatus('Ready');
+                isPlayingAudio = false;
+            }
+            URL.revokeObjectURL(audioUrl);
+        };
+
+        audio.onerror = (e) => {
+            if (thisSessionId === audioSessionId) {
+                console.error('Audio error:', e);
+                updateStatus('Error loading audio');
+                isPlayingAudio = false;
+            }
+            URL.revokeObjectURL(audioUrl);
+        };
+
+        // Set src with blob URL
+        audio.src = audioUrl;
+        audio.load();
+
+        // CRITICAL for Safari/iOS: Call play() within the same event context
+        // Now the audio is already loaded as a blob, so it will play immediately
+        try {
+            updateStatus('Playing...');
+            const playPromise = audio.play();
+
+            if (playPromise !== undefined) {
+                playPromise
+                    .then(() => {
+                        if (thisSessionId === audioSessionId) {
+                            console.log('HTTP audio playing');
+                        }
+                    })
+                    .catch(error => {
+                        if (thisSessionId !== audioSessionId) {
+                            console.log('Play cancelled - session expired');
+                            URL.revokeObjectURL(audioUrl);
+                            return;
+                        }
+
+                        if (error.name === 'AbortError') {
+                            console.log('Play interrupted - this is normal if a new request was made');
+                        } else if (error.name === 'NotSupportedError') {
+                            console.error('Audio format not supported:', error);
+                            updateStatus('Audio format not supported on this browser');
+                        } else {
+                            console.error('Play error:', error);
+                            updateStatus('Playback error: ' + error.message);
+                        }
+                        URL.revokeObjectURL(audioUrl);
+                    });
+            }
+        } catch (error) {
+            console.error('Error starting playback:', error);
+            updateStatus('Error: ' + error.message);
+            URL.revokeObjectURL(audioUrl);
+        }
+
     } catch (error) {
         console.error('Error:', error);
         updateStatus('Error: ' + error.message);
@@ -101,28 +220,80 @@ function base64ToArrayBuffer(base64) {
 
 function playAudio() {
     if (audioChunks.length === 0 || isPlayingAudio) return;
-    
+
+    stopCurrentAudio();
     isPlayingAudio = true;
+
     const audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
     const audioUrl = URL.createObjectURL(audioBlob);
-    
+
     const audio = document.getElementById("audio");
-    audio.src = audioUrl;
-    audio.play()
-        .then(() => updateStatus('Playing'))
-        .catch(err => {
-            console.error('Playback error:', err);
-            updateStatus('Playback error');
-            isPlayingAudio = false;
-        });
-    
+    currentAudio = audio;
+
+    // Capture the session ID for this audio request
+    const thisSessionId = audioSessionId;
+
+    // Set up event listeners
     audio.onended = () => {
-        isPlayingAudio = false;
-        updateStatus('Ready');
+        if (thisSessionId === audioSessionId) {
+            isPlayingAudio = false;
+            updateStatus('Ready');
+        }
         URL.revokeObjectURL(audioUrl);
     };
-    
+
+    audio.onerror = (e) => {
+        if (thisSessionId === audioSessionId) {
+            console.error('Audio error:', e);
+            updateStatus('Error loading audio');
+            isPlayingAudio = false;
+        }
+        URL.revokeObjectURL(audioUrl);
+    };
+
+    // Set src and load
+    audio.src = audioUrl;
+    audio.load();
+
+    // Clear chunks now
     audioChunks = [];
+
+    // CRITICAL for Safari/iOS: Call play() immediately, not in oncanplay
+    try {
+        updateStatus('Playing...');
+        const playPromise = audio.play();
+
+        if (playPromise !== undefined) {
+            playPromise
+                .then(() => {
+                    if (thisSessionId === audioSessionId) {
+                        console.log('WebSocket audio playing');
+                    }
+                })
+                .catch(error => {
+                    if (thisSessionId !== audioSessionId) {
+                        console.log('Play cancelled - session expired');
+                        URL.revokeObjectURL(audioUrl);
+                        return;
+                    }
+
+                    if (error.name === 'AbortError') {
+                        console.log('Play interrupted - this is normal if a new request was made');
+                    } else if (error.name === 'NotSupportedError') {
+                        console.error('Audio format not supported:', error);
+                        updateStatus('Audio format not supported on this browser');
+                    } else {
+                        console.error('Play error:', error);
+                        updateStatus('Playback error: ' + error.message);
+                    }
+                    URL.revokeObjectURL(audioUrl);
+                });
+        }
+    } catch (error) {
+        console.error('Error starting playback:', error);
+        updateStatus('Error: ' + error.message);
+        URL.revokeObjectURL(audioUrl);
+    }
 }
 
 // UI Functions

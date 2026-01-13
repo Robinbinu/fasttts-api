@@ -1,3 +1,9 @@
+
+# Ensure HuggingFace models are downloaded to ./models
+import os
+os.environ["HF_HOME"] = os.path.abspath("models")
+
+
 if __name__ == "__main__":
     print("Starting server")
     import logging
@@ -58,6 +64,65 @@ SUPPORTED_ENGINES = [
     "kokoro"
 ]
 
+engines = {}
+play_text_to_speech_semaphore = threading.Semaphore(1)
+voices = {}
+current_engine = None
+current_engine_name = None
+speaking_lock = threading.Lock()
+tts_lock = threading.Lock()
+gen_lock = threading.Lock()
+
+def _set_engine(engine_name):
+    global current_engine, current_engine_name, stream
+    if engine_name not in engines:
+        print(f"Warning: Engine '{engine_name}' not available")
+        return False
+    
+    current_engine = engines[engine_name]
+    current_engine_name = engine_name
+
+    if voices[engine_name]:
+        engines[engine_name].set_voice(voices[engine_name][0].name)
+    
+    return True
+
+def init_tts_engines():
+    global START_ENGINE
+
+    print("Initializing TTS Engines")
+
+    for engine_name in SUPPORTED_ENGINES:
+        if engine_name == "azure":
+            ...
+        elif engine_name == "elevenlabs":
+            ...
+        elif engine_name == "system":
+            engines["system"] = SystemEngine()
+        elif engine_name == "kokoro":
+            engines["kokoro"] = KokoroEngine()
+        elif engine_name == "openai":
+            ...
+
+    if not engines:
+        raise RuntimeError("No TTS engines initialized")
+
+    for name, engine in engines.items():
+        try:
+            voices[name] = engine.get_voices()
+        except Exception:
+            voices[name] = []
+
+    # if "kokoro" in engines:
+    #     START_ENGINE = "kokoro"
+    # else:
+    #     START_ENGINE = next(iter(engines))
+
+    # _set_engine(START_ENGINE)
+    # print(f"Default engine set to: {START_ENGINE}")
+
+init_tts_engines()
+
 # START_ENGINE will be set to the first successfully initialized engine
 START_ENGINE = None
 
@@ -82,15 +147,6 @@ origins = [
     "https://127.0.0.1",
     f"https://127.0.0.1:{PORT}",
 ]
-
-play_text_to_speech_semaphore = threading.Semaphore(1)
-engines = {}
-voices = {}
-current_engine = None
-current_engine_name = None
-speaking_lock = threading.Lock()
-tts_lock = threading.Lock()
-gen_lock = threading.Lock()
 
 
 def detect_audio_format(chunk):
@@ -291,20 +347,6 @@ async def add_security_headers(request: Request, call_next):
 async def favicon():
     return FileResponse("static/favicon.ico")
 
-
-def _set_engine(engine_name):
-    global current_engine, current_engine_name, stream
-    if engine_name not in engines:
-        print(f"Warning: Engine '{engine_name}' not available")
-        return False
-    
-    current_engine = engines[engine_name]
-    current_engine_name = engine_name
-
-    if voices[engine_name]:
-        engines[engine_name].set_voice(voices[engine_name][0].name)
-    
-    return True
 
 
 @app.get("/set_engine")

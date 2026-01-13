@@ -1,5 +1,10 @@
-import argparse
+
 import os
+# Ensure HuggingFace models are downloaded to ./models
+os.environ["HF_HOME"] = os.path.abspath("models")
+os.environ["TRANSFORMERS_CACHE"] = os.path.abspath("models")
+
+import argparse
 
 parser = argparse.ArgumentParser(description="Run the TTS FastAPI server.")
 parser.add_argument("-p", "--port", type=int, default=int(os.environ.get("TTS_FASTAPI_PORT", 8000)),

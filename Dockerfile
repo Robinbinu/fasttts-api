@@ -31,7 +31,7 @@ COPY async_server.py .
 COPY static/ ./static/
 
 # Create models directory for Hugging Face cache
-RUN mkdir -p /app/models
+COPY models/ ./models/
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
@@ -46,4 +46,4 @@ ENV TTS_FASTAPI_PORT=${PORT}
 EXPOSE 8080
 
 # Run the application
-CMD exec uvicorn async_server:app --host 0.0.0.0 --port ${PORT}
+CMD exec uvicorn async_server:app --host 0.0.0.0 --port 8080 --workers 1

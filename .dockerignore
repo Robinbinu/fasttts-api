@@ -27,7 +27,6 @@ Thumbs.db
 .gitignore
 
 # Project specific
-models/
 *.wav
 *.mp3
 *.log

@@ -24,14 +24,20 @@ RUN pip install --no-cache-dir uv
 # Install Python dependencies using uv
 RUN uv pip install --system --no-cache \
     fastapi[all] \
-    "realtimetts[all]"
+    "realtimetts[all]" \
+    pydub \
+    websockets \
+    python-dotenv
 
 # Copy application files
-COPY async_server.py .
+COPY src/ ./src/
 COPY static/ ./static/
 
 # Create models directory for Hugging Face cache
 COPY models/ ./models/
+
+# Install the package in editable mode
+RUN uv pip install --system --no-cache -e .
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
@@ -46,4 +52,4 @@ ENV TTS_FASTAPI_PORT=${PORT}
 EXPOSE 8080
 
 # Run the application
-CMD exec uvicorn async_server:app --host 0.0.0.0 --port 8080 --workers 1
+CMD exec uvicorn fasttts.app:app --host 0.0.0.0 --port 8080 --workers 1

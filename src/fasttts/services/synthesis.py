@@ -1,8 +1,15 @@
 """TTS synthesis request handling."""
 
 import logging
+import sys
 import threading
+from pathlib import Path
 from queue import Queue
+
+# Add local lib to path for vendored RealtimeTTS
+_lib_path = Path(__file__).parent.parent.parent.parent / "lib"
+if str(_lib_path) not in sys.path:
+    sys.path.insert(0, str(_lib_path))
 
 from RealtimeTTS import TextToAudioStream
 

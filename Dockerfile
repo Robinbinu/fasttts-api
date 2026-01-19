@@ -32,6 +32,7 @@ RUN uv pip install --system --no-cache \
 # Copy application files
 COPY src/ ./src/
 COPY static/ ./static/
+COPY lib/ ./lib/
 
 # Create models directory for Hugging Face cache
 COPY models/ ./models/

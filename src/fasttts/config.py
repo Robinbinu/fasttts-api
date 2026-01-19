@@ -25,14 +25,29 @@ class Settings:
     elevenlabs_api_key: str | None = field(default_factory=lambda: os.environ.get("ELEVENLABS_API_KEY"))
     openai_api_key: str | None = field(default_factory=lambda: os.environ.get("OPENAI_API_KEY"))
 
-    # Supported engines
+    # NeuTTS settings
+    neutts_voices_dir: Path | None = field(default_factory=lambda: Path(os.environ.get("NEUTTS_VOICES_DIR", "voices")).resolve() if os.environ.get("NEUTTS_VOICES_DIR") else None)
+    neutts_model: str = field(default_factory=lambda: os.environ.get("NEUTTS_MODEL", "neutts-nano"))
+    neutts_device: str = field(default_factory=lambda: os.environ.get("NEUTTS_DEVICE", "cpu"))
+
+    # PocketTTS settings
+    pocket_tts_voice: str = field(default_factory=lambda: os.environ.get("POCKET_TTS_VOICE", "alba"))
+
+    # Supported engines (comment out engines to disable)
+    # supported_engines: list[str] = field(default_factory=lambda: [
+    #     "azure",
+    #     "openai",
+    #     "elevenlabs",
+    #     "system",
+    #     "kokoro",
+    #     "neutts",  # Disabled - requires model download first
+    #     "pocket_tts",
+    # ])
+    
     supported_engines: list[str] = field(default_factory=lambda: [
-        "azure",
-        "openai",
-        "elevenlabs",
-        "system",
-        "kokoro"
+        "pocket_tts",
     ])
+
 
     # CORS origins
     cors_origins: list[str] = field(default_factory=list)

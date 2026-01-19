@@ -11,13 +11,60 @@ _lib_path = Path(__file__).parent.parent.parent.parent / "lib"
 if str(_lib_path) not in sys.path:
     sys.path.insert(0, str(_lib_path))
 
-from RealtimeTTS import (
-    AzureEngine,
-    ElevenlabsEngine,
-    SystemEngine,
-    OpenAIEngine,
-    KokoroEngine,
-)
+# Lazy import engines to handle missing dependencies gracefully
+AzureEngine = None
+ElevenlabsEngine = None
+SystemEngine = None
+OpenAIEngine = None
+KokoroEngine = None
+NeuTTSEngine = None
+PocketTTSEngine = None
+
+def _import_engines():
+    """Import engines lazily, skipping those with missing dependencies."""
+    global AzureEngine, ElevenlabsEngine, SystemEngine, OpenAIEngine, KokoroEngine, NeuTTSEngine, PocketTTSEngine
+
+    try:
+        from RealtimeTTS import AzureEngine as _AzureEngine
+        AzureEngine = _AzureEngine
+    except ImportError as e:
+        logging.warning(f"AzureEngine not available: {e}")
+
+    try:
+        from RealtimeTTS import ElevenlabsEngine as _ElevenlabsEngine
+        ElevenlabsEngine = _ElevenlabsEngine
+    except ImportError as e:
+        logging.warning(f"ElevenlabsEngine not available: {e}")
+
+    try:
+        from RealtimeTTS import SystemEngine as _SystemEngine
+        SystemEngine = _SystemEngine
+    except ImportError as e:
+        logging.warning(f"SystemEngine not available: {e}")
+
+    try:
+        from RealtimeTTS import OpenAIEngine as _OpenAIEngine
+        OpenAIEngine = _OpenAIEngine
+    except ImportError as e:
+        logging.warning(f"OpenAIEngine not available: {e}")
+
+    try:
+        from RealtimeTTS import KokoroEngine as _KokoroEngine
+        KokoroEngine = _KokoroEngine
+    except (ImportError, AttributeError) as e:
+        logging.warning(f"KokoroEngine not available: {e}")
+
+    try:
+        from RealtimeTTS import NeuTTSEngine as _NeuTTSEngine
+        NeuTTSEngine = _NeuTTSEngine
+    except ImportError as e:
+        logging.warning(f"NeuTTSEngine not available: {e}")
+
+    try:
+        from RealtimeTTS import PocketTTSEngine as _PocketTTSEngine
+        PocketTTSEngine = _PocketTTSEngine
+    except ImportError as e:
+        logging.warning(f"PocketTTSEngine not available: {e}")
 
 from ..config import settings
 
@@ -58,10 +105,15 @@ class EngineManager:
         """Initialize all supported TTS engines based on available API keys."""
         print("Initializing TTS Engines")
 
+        # Import engines (handles missing dependencies gracefully)
+        _import_engines()
+
         for engine_name in settings.supported_engines:
             try:
                 if engine_name == "azure":
-                    if settings.azure_speech_key and settings.azure_speech_region:
+                    if AzureEngine is None:
+                        print("Azure engine skipped - dependencies not available")
+                    elif settings.azure_speech_key and settings.azure_speech_region:
                         print("Initializing azure engine")
                         self.engines["azure"] = AzureEngine(
                             settings.azure_speech_key,
@@ -71,26 +123,56 @@ class EngineManager:
                         print("Azure engine skipped - missing AZURE_SPEECH_KEY or AZURE_SPEECH_REGION")
 
                 elif engine_name == "elevenlabs":
-                    if settings.elevenlabs_api_key:
+                    if ElevenlabsEngine is None:
+                        print("Elevenlabs engine skipped - dependencies not available")
+                    elif settings.elevenlabs_api_key:
                         print("Initializing elevenlabs engine")
                         self.engines["elevenlabs"] = ElevenlabsEngine(settings.elevenlabs_api_key)
                     else:
                         print("Elevenlabs engine skipped - missing ELEVENLABS_API_KEY")
 
                 elif engine_name == "system":
-                    print("Initializing system engine")
-                    self.engines["system"] = SystemEngine()
+                    if SystemEngine is None:
+                        print("System engine skipped - dependencies not available")
+                    else:
+                        print("Initializing system engine")
+                        self.engines["system"] = SystemEngine()
 
                 elif engine_name == "kokoro":
-                    print("Initializing kokoro engine")
-                    self.engines["kokoro"] = KokoroEngine()
+                    if KokoroEngine is None:
+                        print("Kokoro engine skipped - dependencies not available")
+                    else:
+                        print("Initializing kokoro engine")
+                        self.engines["kokoro"] = KokoroEngine()
 
                 elif engine_name == "openai":
-                    if settings.openai_api_key:
+                    if OpenAIEngine is None:
+                        print("OpenAI engine skipped - dependencies not available")
+                    elif settings.openai_api_key:
                         print("Initializing openai engine")
                         self.engines["openai"] = OpenAIEngine()
                     else:
                         print("OpenAI engine skipped - missing OPENAI_API_KEY")
+
+                elif engine_name == "neutts":
+                    if NeuTTSEngine is None:
+                        print("NeuTTS engine skipped - dependencies not available")
+                    else:
+                        print("Initializing neutts engine")
+                        self.engines["neutts"] = NeuTTSEngine(
+                            model=settings.neutts_model,
+                            device=settings.neutts_device,
+                            voices_dir=str(settings.neutts_voices_dir) if settings.neutts_voices_dir else None,
+                        )
+
+                elif engine_name == "pocket_tts":
+                    if PocketTTSEngine is None:
+                        print("PocketTTS engine skipped - dependencies not available")
+                    else:
+                        print("Initializing pocket_tts engine")
+                        self.engines["pocket_tts"] = PocketTTSEngine(
+                            voice=settings.pocket_tts_voice,
+                        )
 
             except Exception as e:
                 logging.error(f"Error initializing {engine_name} engine: {e}")

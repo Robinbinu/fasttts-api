@@ -4,6 +4,8 @@ import asyncio
 import base64
 from queue import Empty
 
+from typing import Optional
+
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from ..engines import engine_manager
@@ -13,7 +15,8 @@ router = APIRouter()
 
 
 @router.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
+@router.websocket("/{voice}/ws")
+async def websocket_endpoint(websocket: WebSocket, voice: Optional[str] = None):
     """WebSocket endpoint for TTS - supports multiple concurrent users.
 
     Accepts text messages and returns audio chunks in WAV format.
@@ -33,6 +36,11 @@ async def websocket_endpoint(websocket: WebSocket):
 
     await websocket.accept()
     print("WebSocket client connected")
+
+    # Set voice for this session if provided
+    if voice:
+        engine_manager.set_voice(voice)
+        print(f"Voice set to: {voice}")
 
     request_queue: asyncio.Queue = asyncio.Queue()
     is_active = True

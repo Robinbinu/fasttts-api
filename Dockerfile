@@ -39,7 +39,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get clean
 
 # Copy Python environment
-COPY --from=builder /usr/local /usr/local
+# Copy only what we need from builder
+COPY --from=builder /usr/local/lib/python3.10 /usr/local/lib/python3.10
+COPY --from=builder /usr/local/bin /usr/local/bin
 
 # Clean up Python cache and test files to reduce size
 RUN find /usr/local -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true \

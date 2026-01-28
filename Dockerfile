@@ -17,15 +17,17 @@ COPY pyproject.toml ./
 
 RUN pip install --no-cache-dir uv
 
-# 🔴 Install ONLY what you need (NO [all])
+RUN pip install --no-cache-dir \
+    torch \
+    --index-url https://download.pytorch.org/whl/cpu
+
 RUN uv pip install --system --no-cache \
     fastapi \
     uvicorn[standard] \
     websockets \
     python-dotenv \
     pydub \
-    realtimetts \
-    torch --index-url https://download.pytorch.org/whl/cpu
+    realtimetts
 
 COPY src/ ./src/
 COPY lib/ ./lib/

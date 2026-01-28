@@ -64,7 +64,7 @@ COPY static/ ./static/
 ENV PYTHONUNBUFFERED=1
 ENV PORT=8080
 ENV PYTHONPATH=/app/lib
-ENV HF_HOME=/app/models
+ENV HF_HOME=models
 ENV HF_HUB_CACHE=/app/models/hub
 ENV TRANSFORMERS_CACHE=/app/models/hub
 ENV HF_TOKEN=hf_bPyeshcmjrOTeQntrCdmnSKAlWmCcoNUimD

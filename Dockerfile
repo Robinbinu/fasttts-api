@@ -49,11 +49,14 @@ RUN find /usr/local -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || t
 # Copy app + vendored RealtimeTTS
 COPY src/ ./src/
 COPY lib/ ./lib/
+COPY models/ ./models/
 COPY static/ ./static/
 
 ENV PYTHONUNBUFFERED=1
 ENV PORT=8080
 ENV PYTHONPATH=/app/lib
+ENV HF_HUB_OFFLINE=1
+ENV HF_HUB_DISABLE_TELEMETRY=1
 
 EXPOSE 8080
 

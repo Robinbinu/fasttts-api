@@ -35,7 +35,9 @@ COPY static/ ./static/
 COPY lib/ ./lib/
 
 # Create models directory for Hugging Face cache
-COPY models/ ./models/
+# COPY models/ ./models/
+RUN mkdir -p /app/models
+
 
 # Install the package in editable mode
 RUN uv pip install --system --no-cache -e .

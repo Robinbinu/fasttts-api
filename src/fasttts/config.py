@@ -56,17 +56,8 @@ class Settings:
         # Set HF_HOME environment variable
         os.environ["HF_HOME"] = str(self.hf_home)
 
-        # Build CORS origins
-        self.cors_origins = [
-            "http://localhost",
-            f"http://localhost:{self.port}",
-            "http://127.0.0.1",
-            f"http://127.0.0.1:{self.port}",
-            "https://localhost",
-            f"https://localhost:{self.port}",
-            "https://127.0.0.1",
-            f"https://127.0.0.1:{self.port}",
-        ]
+        # Build CORS origins - allow all for public access
+        self.cors_origins = ["*"]
 
 
 # Global settings instance

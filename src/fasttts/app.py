@@ -27,8 +27,8 @@ def create_app() -> FastAPI:
 
     app = FastAPI(title="FastTTS API", version="0.1.0")
 
-    # Mount static files
-    static_dir = Path(__file__).parent.parent.parent / "static"
+    # Mount static files (use absolute path since package is installed)
+    static_dir = Path("/app/static")
     if static_dir.exists():
         app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 

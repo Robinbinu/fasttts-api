@@ -5,12 +5,10 @@ FROM python:3.10-slim AS builder
 
 WORKDIR /build
 
-# Only build-time system deps
-RUN apt-get update && apt-get install -y \
+# Only build-time system deps (minimal)
+RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     portaudio19-dev \
-    ffmpeg \
-    espeak-ng \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy project files
@@ -22,25 +20,31 @@ COPY lib/ ./lib/
 RUN pip install --no-cache-dir uv
 
 # Install Python deps from pyproject.toml
-# (includes pocket-tts, numpy<2, etc.)
 RUN uv pip install --system --no-cache .
 
 # ======================
 # Runtime stage
 # ======================
-FROM python:3.11-slim
+FROM python:3.10-slim
 
 WORKDIR /app
 
-# Runtime-only system deps
-RUN apt-get update && apt-get install -y \
+# Runtime-only system deps (minimal, no recommends)
+RUN apt-get update && apt-get install -y --no-install-recommends \
     libportaudio2 \
     ffmpeg \
     espeak-ng \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
 
 # Copy Python environment
 COPY --from=builder /usr/local /usr/local
+
+# Clean up Python cache and test files to reduce size
+RUN find /usr/local -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true \
+    && find /usr/local -type d -name "*.dist-info" -exec rm -rf {}/direct_url.json {} + 2>/dev/null || true \
+    && find /usr/local -type f -name "*.pyc" -delete 2>/dev/null || true \
+    && find /usr/local -type f -name "*.pyo" -delete 2>/dev/null || true
 
 # Copy app + vendored RealtimeTTS
 COPY src/ ./src/
@@ -49,6 +53,7 @@ COPY static/ ./static/
 
 ENV PYTHONUNBUFFERED=1
 ENV PORT=8080
+ENV PYTHONPATH=/app/lib
 
 EXPOSE 8080
 
